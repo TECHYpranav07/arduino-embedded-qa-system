@@ -1,17 +1,18 @@
 /**
  * @file smart_led_controller.ino
- * @brief Smart Multi-Mode LED & Status Controller (v0.3.0 - Debounced Input Engine)
+ * @brief Smart Multi-Mode LED & Status Controller (v0.4.0 - Thermal & PWM Safe Engine)
  * @course Project Management (2307476T) - Activity 1
  * @author Pranav Karande (Department of E&TC Engineering, MIT Academy of Engineering)
  *
  * Resolved Issues:
  * - Fixes #1: Replaced blocking delay() with asynchronous millis() state scheduler.
- * - Fixes #2: Configured INPUT_PULLUP and integrated 50ms software debounce filter
- *   with falling-edge transition latching.
+ * - Fixes #2: Configured INPUT_PULLUP and integrated 50ms software debounce filter.
+ * - Fixes #3: Integrated PWM duty cycle throttling (MAX_PWM_DUTY = 150) and soft-fade
+ *   transitions to prevent GPIO overcurrent and thermal junction stress.
  */
 
 // Hardware Pin Definitions
-const int LED_PIN = 9;       // Status LED (PWM capable pin)
+const int LED_PIN = 9;       // Status LED (PWM capable pin OC1A)
 const int BUTTON_PIN = 2;    // Mode select push button
 
 // Global State Variables
@@ -22,18 +23,28 @@ unsigned long previousBlinkMillis = 0;
 bool ledOutputState = LOW;
 
 // Software Debouncing & Edge Detection Variables (Fixes #2)
-int buttonState = HIGH;             // Filtered steady-state button reading
-int lastButtonReading = HIGH;       // Raw reading from the previous loop iteration
-unsigned long lastDebounceTime = 0; // Timestamp of the last raw reading change
-const unsigned long DEBOUNCE_DELAY_MS = 50; // 50ms settling window for switch chatter
+int buttonState = HIGH;
+int lastButtonReading = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY_MS = 50;
+
+// PWM Power Throttling & Soft-Fade Parameters (Fixes #3)
+const int MAX_PWM_DUTY = 150;        // Max 58.8% duty cycle to cap current at ~12mA
+const int MIN_PWM_DUTY = 0;
+int currentBrightness = 0;
+int fadeDirection = 5;               // Step increment for breathing effect
+unsigned long previousFadeMillis = 0;
+const unsigned long FADE_INTERVAL_MS = 25; // 25ms fade step interval
 
 void setup() {
     Serial.begin(9600);
     pinMode(LED_PIN, OUTPUT);
-    // Fixes #2: Activate internal pull-up resistor (prevents floating state)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    Serial.println(F("[SYSTEM] Embedded LED Controller Initialized (v0.3.0 - Debounced)"));
+    // Initialize LED in safe OFF state
+    analogWrite(LED_PIN, 0);
+    
+    Serial.println(F("[SYSTEM] Embedded LED Controller Initialized (v0.4.0 - PWM Throttled)"));
 }
 
 void loop() {
@@ -41,56 +52,64 @@ void loop() {
 
     // 1. Debounced Push Button Sampling (Fixes #2)
     int rawReading = digitalRead(BUTTON_PIN);
-
-    // Reset debounce timer if raw state changed (mechanical bounce detected)
     if (rawReading != lastButtonReading) {
         lastDebounceTime = currentMillis;
     }
 
-    // If state has persisted beyond debounce delay window, validate new stable state
     if ((currentMillis - lastDebounceTime) > DEBOUNCE_DELAY_MS) {
-        // Detect falling edge (HIGH -> LOW on active-low pull-up button)
         if (rawReading != buttonState) {
             buttonState = rawReading;
             
             if (buttonState == LOW) {
-                // Legitimate debounced press event
                 currentMode = (currentMode + 1) % 4;
-                Serial.print(F("[EVENT] Debounced Mode switched to: "));
+                Serial.print(F("[EVENT] Mode switched to: "));
                 Serial.println(currentMode);
                 
-                // Synchronize output state
                 previousBlinkMillis = currentMillis;
-                ledOutputState = (currentMode == 1) ? HIGH : LOW;
-                digitalWrite(LED_PIN, ledOutputState);
+                previousFadeMillis = currentMillis;
+                
+                // Safe state initialization on mode change
+                if (currentMode == 0) {
+                    analogWrite(LED_PIN, 0);
+                } else if (currentMode == 1) {
+                    analogWrite(LED_PIN, MAX_PWM_DUTY); // Clamped power
+                }
             }
         }
     }
     lastButtonReading = rawReading;
 
-    // 2. Execute Non-Blocking Mode Behavior (Fixes #1)
+    // 2. Execute Non-Blocking & PWM Safe Behavior (Fixes #1, #3)
     switch (currentMode) {
-        case 0: // OFF
-            digitalWrite(LED_PIN, LOW);
+        case 0: // OFF (0% duty cycle)
+            analogWrite(LED_PIN, 0);
             break;
             
-        case 1: // Constant ON
-            digitalWrite(LED_PIN, HIGH);
+        case 1: // Power-Clamped Steady ON (~58% duty cycle, 12mA max)
+            analogWrite(LED_PIN, MAX_PWM_DUTY);
             break;
             
-        case 2: // Heartbeat Blink (1000ms ON / 1000ms OFF asynchronous)
+        case 2: // Heartbeat Blink (1000ms ON at clamped PWM / 1000ms OFF)
             if (currentMillis - previousBlinkMillis >= 1000) {
                 previousBlinkMillis = currentMillis;
                 ledOutputState = !ledOutputState;
-                digitalWrite(LED_PIN, ledOutputState);
+                analogWrite(LED_PIN, ledOutputState ? MAX_PWM_DUTY : 0);
             }
             break;
             
-        case 3: // Rapid Alert Blink (200ms ON / 200ms OFF asynchronous)
-            if (currentMillis - previousBlinkMillis >= 200) {
-                previousBlinkMillis = currentMillis;
-                ledOutputState = !ledOutputState;
-                digitalWrite(LED_PIN, ledOutputState);
+        case 3: // Smooth Breathing / Alert Strobe with Soft PWM Modulation
+            if (currentMillis - previousFadeMillis >= FADE_INTERVAL_MS) {
+                previousFadeMillis = currentMillis;
+                currentBrightness += fadeDirection;
+                
+                if (currentBrightness >= MAX_PWM_DUTY) {
+                    currentBrightness = MAX_PWM_DUTY;
+                    fadeDirection = -fadeDirection;
+                } else if (currentBrightness <= MIN_PWM_DUTY) {
+                    currentBrightness = MIN_PWM_DUTY;
+                    fadeDirection = -fadeDirection;
+                }
+                analogWrite(LED_PIN, currentBrightness);
             }
             break;
     }
@@ -98,6 +117,6 @@ void loop() {
     // 3. Serial Telemetry Broadcast (QA Notice: Issue #4 tracking pending)
     Serial.print(F("[TELEMETRY] Mode="));
     Serial.print(currentMode);
-    Serial.print(F(" | LED_State="));
-    Serial.println(digitalRead(LED_PIN));
+    Serial.print(F(" | PWM_Duty="));
+    Serial.println(currentMode == 3 ? currentBrightness : (currentMode == 1 ? MAX_PWM_DUTY : (ledOutputState ? MAX_PWM_DUTY : 0)));
 }
