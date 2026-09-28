@@ -1,12 +1,13 @@
 /**
  * @file smart_led_controller.ino
- * @brief Smart Multi-Mode LED & Status Controller (v0.2.0 - Non-Blocking Engine)
+ * @brief Smart Multi-Mode LED & Status Controller (v0.3.0 - Debounced Input Engine)
  * @course Project Management (2307476T) - Activity 1
  * @author Pranav Karande (Department of E&TC Engineering, MIT Academy of Engineering)
  *
- * Resolved Issue:
+ * Resolved Issues:
  * - Fixes #1: Replaced blocking delay() with asynchronous millis() state scheduler.
- *   I/O polling cycle is now decoupled from LED timing.
+ * - Fixes #2: Configured INPUT_PULLUP and integrated 50ms software debounce filter
+ *   with falling-edge transition latching.
  */
 
 // Hardware Pin Definitions
@@ -15,35 +16,57 @@ const int BUTTON_PIN = 2;    // Mode select push button
 
 // Global State Variables
 int currentMode = 0;
-int lastButtonState = HIGH;
 
 // Non-Blocking Asynchronous Timing Variables (Fixes #1)
 unsigned long previousBlinkMillis = 0;
 bool ledOutputState = LOW;
 
+// Software Debouncing & Edge Detection Variables (Fixes #2)
+int buttonState = HIGH;             // Filtered steady-state button reading
+int lastButtonReading = HIGH;       // Raw reading from the previous loop iteration
+unsigned long lastDebounceTime = 0; // Timestamp of the last raw reading change
+const unsigned long DEBOUNCE_DELAY_MS = 50; // 50ms settling window for switch chatter
+
 void setup() {
     Serial.begin(9600);
     pinMode(LED_PIN, OUTPUT);
-    pinMode(BUTTON_PIN, INPUT); // QA Notice: Issue #2 tracking pending
-    Serial.println(F("[SYSTEM] Embedded LED Controller Initialized (v0.2.0 - Non-Blocking)"));
+    // Fixes #2: Activate internal pull-up resistor (prevents floating state)
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    
+    Serial.println(F("[SYSTEM] Embedded LED Controller Initialized (v0.3.0 - Debounced)"));
 }
 
 void loop() {
     unsigned long currentMillis = millis();
 
-    // 1. Read Push Button to switch modes (Now responsive immediately)
-    int buttonReading = digitalRead(BUTTON_PIN);
-    if (buttonReading == LOW && lastButtonState == HIGH) {
-        currentMode = (currentMode + 1) % 4;
-        Serial.print(F("[EVENT] Mode switched to: "));
-        Serial.println(currentMode);
-        
-        // Reset blink phase upon mode switch
-        previousBlinkMillis = currentMillis;
-        ledOutputState = (currentMode == 1) ? HIGH : LOW;
-        digitalWrite(LED_PIN, ledOutputState);
+    // 1. Debounced Push Button Sampling (Fixes #2)
+    int rawReading = digitalRead(BUTTON_PIN);
+
+    // Reset debounce timer if raw state changed (mechanical bounce detected)
+    if (rawReading != lastButtonReading) {
+        lastDebounceTime = currentMillis;
     }
-    lastButtonState = buttonReading;
+
+    // If state has persisted beyond debounce delay window, validate new stable state
+    if ((currentMillis - lastDebounceTime) > DEBOUNCE_DELAY_MS) {
+        // Detect falling edge (HIGH -> LOW on active-low pull-up button)
+        if (rawReading != buttonState) {
+            buttonState = rawReading;
+            
+            if (buttonState == LOW) {
+                // Legitimate debounced press event
+                currentMode = (currentMode + 1) % 4;
+                Serial.print(F("[EVENT] Debounced Mode switched to: "));
+                Serial.println(currentMode);
+                
+                // Synchronize output state
+                previousBlinkMillis = currentMillis;
+                ledOutputState = (currentMode == 1) ? HIGH : LOW;
+                digitalWrite(LED_PIN, ledOutputState);
+            }
+        }
+    }
+    lastButtonReading = rawReading;
 
     // 2. Execute Non-Blocking Mode Behavior (Fixes #1)
     switch (currentMode) {
