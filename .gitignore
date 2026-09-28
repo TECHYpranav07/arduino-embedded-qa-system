@@ -1,0 +1,13 @@
+# Operating System Files
+Thumbs.db
+.DS_Store
+
+# Build artifacts
+*.hex
+*.elf
+*.bin
+build/
+.cache/
+.vscode/
+
+# Keep reports and PDF
